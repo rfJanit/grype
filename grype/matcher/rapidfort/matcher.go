@@ -24,9 +24,18 @@ import (
 // rfDistroMap maps a detected base OS type to its RF-prefixed counterpart in the DB.
 // Extend this (plus getPackageType in v6 transform.go) when RF curates a new base distro.
 var rfDistroMap = map[distro.Type]distro.Type{
-	distro.Ubuntu: distro.RapidFortUbuntu,
-	distro.Alpine: distro.RapidFortAlpine,
-	distro.RedHat: distro.RapidFortRedHat,
+	distro.Ubuntu:      distro.RapidFortUbuntu,
+	distro.Alpine:      distro.RapidFortAlpine,
+	distro.RedHat:      distro.RapidFortRedHat,
+	distro.OracleLinux: distro.RapidFortOracle,
+}
+
+// rfRPMDistros is the set of RF-prefixed RPM-based distros. These share the
+// RHEL-style ".el<N>" release-identifier convention, so they all run through
+// byRPMReleaseIdentifier on lookup.
+var rfRPMDistros = map[distro.Type]struct{}{
+	distro.RapidFortRedHat: {},
+	distro.RapidFortOracle: {},
 }
 
 var (
@@ -62,7 +71,7 @@ func (m *Matcher) Match(store vulnerability.Provider, p pkg.Package) ([]match.Ma
 		return nil, nil, nil
 	}
 
-	// Only match against supported RF-curated base distros (ubuntu/alpine/redhat).
+	// Only match against supported RF-curated base distros (ubuntu/alpine/redhat/oracle).
 	rfDistroType, ok := rfDistroMap[p.Distro.Type]
 	if !ok {
 		return nil, nil, nil
@@ -115,7 +124,7 @@ func (m *Matcher) Match(store vulnerability.Provider, p pkg.Package) ([]match.Ma
 }
 
 func rapidfortDistroVersion(baseDistro distro.Distro, rfDistroType distro.Type) string {
-	if rfDistroType == distro.RapidFortRedHat && baseDistro.MajorVersion() != "" {
+	if _, ok := rfRPMDistros[rfDistroType]; ok && baseDistro.MajorVersion() != "" {
 		return baseDistro.MajorVersion()
 	}
 	return baseDistro.Version
@@ -154,7 +163,7 @@ func (m *Matcher) matchPackageByDistro(store vulnerability.Provider, searchPkg p
 		internal.OnlyVulnerableVersions(pkgVersion),
 	}
 
-	if searchPkg.Distro.Type == distro.RapidFortRedHat {
+	if _, ok := rfRPMDistros[searchPkg.Distro.Type]; ok {
 		criteria = append(criteria, byRPMReleaseIdentifier(searchPkg))
 	}
 
