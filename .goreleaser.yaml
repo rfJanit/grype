@@ -66,13 +66,27 @@ builds:
     ldflags: *build-ldflags
     hooks:
       post:
-        # RapidFort fork: hard-code --ad-hoc=true so we never require an Apple
-        # Developer ID cert (which anchore's QUILL_SIGN_P12 secret would provide
-        # but we don't have). End-user Macs will show a Gatekeeper warning on
-        # first run; right-click → Open works around it. For proper signing
-        # later, buy a Developer ID ($99/yr), store the P12 as QUILL_SIGN_P12
-        # in the release workflow, and change --ad-hoc back to {{ .IsSnapshot }}.
-        - cmd: .tool/quill sign-and-notarize "{{ .Path }}" --dry-run={{ .IsSnapshot }} --ad-hoc=true -vv
+        # RapidFort fork: hard-code both --dry-run=true AND --ad-hoc=true.
+        #
+        # --ad-hoc=true means quill skips Apple Developer ID signing (we don't
+        # have anchore's QUILL_SIGN_P12 cert). Instead, it does an ad-hoc
+        # signature that satisfies macOS Gatekeeper's basic integrity check.
+        #
+        # --dry-run=true means quill skips the notarization step (submitting
+        # the signed binary to Apple's notary API for stamping). Apple's
+        # notary service ONLY accepts real Developer ID signatures — an
+        # ad-hoc signature fails with "binary is not signed thus will not
+        # pass notarization." Without --dry-run=true, a real release always
+        # fails at this step.
+        #
+        # End-user experience: macOS Gatekeeper shows a warning on first
+        # launch ("<binary> can't be opened because Apple cannot check it
+        # for malicious software"). Right-click → Open dismisses it once.
+        #
+        # For proper signing later: buy an Apple Developer ID ($99/yr),
+        # store the P12 as QUILL_SIGN_P12 + password + notary API keys
+        # in the release workflow, and revert both flags to {{ .IsSnapshot }}.
+        - cmd: .tool/quill sign-and-notarize "{{ .Path }}" --dry-run=true --ad-hoc=true -vv
           env:
             - QUILL_LOG_FILE=/tmp/quill-{{ .Target }}.log
 
