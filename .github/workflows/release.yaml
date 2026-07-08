@@ -71,11 +71,11 @@ jobs:
           # use the same cache we used for building snapshots
           cache-key-prefix: "snapshot"
 
-      - name: Login to Docker Hub
-        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee #v4.2.0
-        with:
-          username: ${{ secrets.ANCHOREOSSWRITE_DH_USERNAME }}
-          password: ${{ secrets.ANCHOREOSSWRITE_DH_PAT }}
+      # RapidFort fork: Docker Hub login removed. .goreleaser.yaml only pushes
+      # images to ghcr.io/rfjanit/grype (not docker.io/anchore/grype), so no
+      # Docker Hub credentials are needed. If a rapidfort/grype Docker Hub org
+      # is set up later, restore this step and store DOCKERHUB_USERNAME +
+      # DOCKERHUB_TOKEN as workflow secrets on the fork.
 
       - name: Login to GitHub Container Registry
         uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee #v4.2.0
@@ -87,38 +87,39 @@ jobs:
       - name: Build & publish release artifacts
         run: make ci-release
         env:
-          # for pushing tags (does not inherit workflow permissions)
-          TAG_TOKEN: ${{ secrets.TAG_TOKEN }}
+          # For pushing the release tag. Anchore's original config used a
+          # dedicated TAG_TOKEN, but since this workflow has `contents: write`
+          # at the job level, GITHUB_TOKEN is sufficient for tag push.
+          TAG_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_VERSION: ${{ github.event.inputs.version }}
-          # for mac signing and notarization...
-          QUILL_SIGN_P12: ${{ secrets.ANCHORE_APPLE_DEVELOPER_ID_CERT_CHAIN }}
-          QUILL_SIGN_PASSWORD: ${{ secrets.ANCHORE_APPLE_DEVELOPER_ID_CERT_PASS }}
-          QUILL_NOTARY_ISSUER: ${{ secrets.APPLE_NOTARY_ISSUER }}
-          QUILL_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
-          QUILL_NOTARY_KEY: ${{ secrets.APPLE_NOTARY_KEY }}
-          # for creating the release (requires write access to packages and content)
+          # For creating the GitHub release (needs contents + packages write,
+          # both declared in the job's `permissions:` block above).
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # for updating brew formula in anchore/homebrew-syft
-          GITHUB_BREW_TOKEN: ${{ secrets.ANCHOREOPS_GITHUB_OSS_WRITE_TOKEN }}
+          #
+          # RapidFort fork: intentionally NOT passing these env vars:
+          #   QUILL_SIGN_P12 / _PASSWORD             — macOS ad-hoc signing hardcoded in .goreleaser.yaml,
+          #   QUILL_NOTARY_ISSUER / _KEY_ID / _KEY     no Apple Developer ID needed. (§3.1)
+          #   GITHUB_BREW_TOKEN                      — homebrew_casks block removed from .goreleaser.yaml. (§3.1)
+          # Re-add these if you buy an Apple Developer ID for real macOS
+          # signing (change .goreleaser.yaml's --ad-hoc=true first) or set
+          # up a rfJanit/homebrew-grype tap.
 
       - uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
         continue-on-error: true
         with:
           artifact-name: sbom.spdx.json
 
-  release-install-script:
-    needs: [release]
-    if: ${{ needs.release.result == 'success' }}
-    permissions:
-      contents: read
-    uses: anchore/workflows/.github/workflows/release-install-script.yaml@b0c30a80409130d329aaa356fd64a34d8c0b3375 # v0.7.2
-    with:
-      tag: ${{ github.event.inputs.version }}
-    secrets:
-      # needed for r2...
-      R2_INSTALL_ACCESS_KEY_ID: ${{ secrets.OSS_R2_INSTALL_ACCESS_KEY_ID }}
-      R2_INSTALL_SECRET_ACCESS_KEY: ${{ secrets.OSS_R2_INSTALL_SECRET_ACCESS_KEY }}
-      R2_ENDPOINT: ${{ secrets.TOOLBOX_CLOUDFLARE_R2_ENDPOINT }}
-      # needed for s3...
-      S3_INSTALL_AWS_ACCESS_KEY_ID: ${{ secrets.TOOLBOX_AWS_ACCESS_KEY_ID }}
-      S3_INSTALL_AWS_SECRET_ACCESS_KEY: ${{ secrets.TOOLBOX_AWS_SECRET_ACCESS_KEY }}
+  # RapidFort fork: `release-install-script` job removed.
+  #
+  # Upstream uploads their `install.sh` to Cloudflare R2 (get.anchore.io/grype)
+  # and AWS S3 buckets using OSS_R2_* / TOOLBOX_* secrets — infrastructure your
+  # fork doesn't have. End users install RapidFort's grype via one of:
+  #   - `docker pull ghcr.io/rfjanit/grype:latest`
+  #   - GitHub Releases tarball / .deb / .rpm (attached to each tag)
+  #
+  # If you want a curl-pipe installer later:
+  # 1. Set up your own R2 or S3 bucket for hosting the install script.
+  # 2. Store the corresponding credentials as workflow secrets.
+  # 3. Restore this job with `rfJanit/workflows` (or a similar own-repo reusable
+  #    workflow) instead of `anchore/workflows`, since the anchore reusable
+  #    workflow may hardcode assumptions about anchore's bucket naming.
