@@ -53,7 +53,7 @@ type client struct {
 
 func DefaultConfig() Config {
 	return Config{
-		LatestURL:          "https://grype.anchore.io/databases",
+		LatestURL:          "https://github.com/rfJanit/grype-db-rf/releases/download",
 		RequireUpdateCheck: false,
 		CheckTimeout:       30 * time.Second,
 		UpdateTimeout:      300 * time.Second,
