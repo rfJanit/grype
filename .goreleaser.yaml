@@ -1,11 +1,13 @@
 version: 2
 
+project_name: grype
+
 release:
   prerelease: auto
   draft: false
 
 env:
-  # required to support multi architecture docker builds
+  # required to support multi-architecture docker builds
   - DOCKER_CLI_EXPERIMENTAL=enabled
   - CGO_ENABLED=0
 
@@ -16,10 +18,18 @@ builds:
     goos:
       - linux
     goarch:
+      # Full arch matrix matches the RapidFort Trivy fork's release surface —
+      # covers 386/arm for legacy systems, amd64/arm64 for the majority, and
+      # s390x/ppc64le for IBM enterprise targets. modernc.org/sqlite (via
+      # glebarez/sqlite in go.mod) supports all six on linux.
+      - "386"
+      - arm
       - amd64
       - arm64
-      - ppc64le
       - s390x
+      - ppc64le
+    goarm:
+      - "7"
     # set the modified timestamp on the output binary to the git timestamp to ensure a reproducible build
     mod_timestamp: &build-timestamp '{{ .CommitTimestamp }}'
     ldflags: &build-ldflags |
@@ -30,6 +40,19 @@ builds:
       -X main.gitCommit={{.Commit}}
       -X main.buildDate={{.Date}}
       -X main.gitDescription={{.Summary}}
+
+  - id: freebsd-build
+    dir: ./cmd/grype
+    binary: grype
+    goos:
+      - freebsd
+    goarch:
+      # modernc.org/sqlite doesn't support freebsd/arm64.
+      # freebsd/386 is no longer supported in modernc.org/libc.
+      # See https://gitlab.com/cznic/libc/-/issues/45
+      - amd64
+    mod_timestamp: *build-timestamp
+    ldflags: *build-ldflags
 
   - id: darwin-build
     dir: ./cmd/grype
@@ -43,7 +66,13 @@ builds:
     ldflags: *build-ldflags
     hooks:
       post:
-        - cmd: .tool/quill sign-and-notarize "{{ .Path }}" --dry-run={{ .IsSnapshot }} --ad-hoc={{ .IsSnapshot }} -vv
+        # RapidFort fork: hard-code --ad-hoc=true so we never require an Apple
+        # Developer ID cert (which anchore's QUILL_SIGN_P12 secret would provide
+        # but we don't have). End-user Macs will show a Gatekeeper warning on
+        # first run; right-click → Open works around it. For proper signing
+        # later, buy a Developer ID ($99/yr), store the P12 as QUILL_SIGN_P12
+        # in the release workflow, and change --ad-hoc back to {{ .IsSnapshot }}.
+        - cmd: .tool/quill sign-and-notarize "{{ .Path }}" --dry-run={{ .IsSnapshot }} --ad-hoc=true -vv
           env:
             - QUILL_LOG_FILE=/tmp/quill-{{ .Target }}.log
 
@@ -53,308 +82,208 @@ builds:
     goos:
       - windows
     goarch:
+      # modernc.org/sqlite doesn't support windows/386 or windows/arm.
       - amd64
     mod_timestamp: *build-timestamp
     ldflags: *build-ldflags
 
 archives:
-  - id: linux-archives
-    ids:
-      - linux-build
-
-  - id: darwin-archives
-    ids:
-      - darwin-build
-
-  - id: windows-archives
-    formats: [zip]
-    ids:
-      - windows-build
+  - id: archive
+    formats: [tar.gz]
+    # Humanized filenames: `grype_0.115.0-rf.1_Linux-64bit.tar.gz` matches the
+    # convention used by the RapidFort Trivy fork so users of both scanners see
+    # the same shape. Original grype convention was `grype_0.115.0-rf.1_linux_amd64.tar.gz`.
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_
+      {{- if eq .Os "darwin" }}macOS
+      {{- else if eq .Os "linux" }}Linux
+      {{- else if eq .Os "freebsd" }}FreeBSD
+      {{- else if eq .Os "windows" }}Windows
+      {{- else }}{{ .Os }}{{ end }}-
+      {{- if eq .Arch "amd64" }}64bit
+      {{- else if eq .Arch "386" }}32bit
+      {{- else if eq .Arch "arm" }}ARM
+      {{- else if eq .Arch "arm64" }}ARM64
+      {{- else if eq .Arch "ppc64le" }}PPC64LE
+      {{- else }}{{ .Arch }}{{ end }}
+    files:
+      - README.md
+      - LICENSE
+      - templates/*.tmpl
+    format_overrides:
+      - goos: windows
+        formats: [zip]
 
 nfpms:
-  - license: "Apache 2.0"
-    maintainer: "Anchore, Inc"
-    homepage: &website "https://github.com/anchore/grype"
-    description: &description "A vulnerability scanner for container images and filesystems"
+  - license: "Apache-2.0"
+    maintainer: "RapidFort"
+    vendor: "RapidFort"
+    homepage: "https://github.com/rfJanit/grype"
+    description: "RapidFort's Grype fork — A vulnerability scanner for container images and filesystems, extended with RapidFort curated advisories."
     formats:
       - rpm
       - deb
+    file_name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_
+      {{- if eq .Os "darwin" }}macOS
+      {{- else if eq .Os "linux" }}Linux
+      {{- else if eq .Os "freebsd" }}FreeBSD
+      {{- else }}{{ title .Os }}{{ end }}-
+      {{- if eq .Arch "amd64" }}64bit
+      {{- else if eq .Arch "386" }}32bit
+      {{- else if eq .Arch "arm" }}ARM
+      {{- else if eq .Arch "arm64" }}ARM64
+      {{- else if eq .Arch "ppc64le" }}PPC64LE
+      {{- else }}{{ .Arch }}{{ end }}
+    # Ship the output-format templates so `grype -o template -t <path>` works
+    # out of the box for anyone who installed via .deb/.rpm.
+    contents:
+      - src: templates/*.tmpl
+        dst: /usr/local/share/grype/templates
+    # RPM signing intentionally omitted — no signing key configured for the first release.
 
-homebrew_casks:
-  - repository:
-      owner: anchore
-      name: homebrew-grype
-      token: "{{.Env.GITHUB_BREW_TOKEN}}"
-    ids:
-      - darwin-archives
-      - linux-archives
-    homepage: *website
-    description: *description
-    license: "Apache License 2.0"
-    conflicts:
-      # claim that the previous grype formula (in the root of homebrew-grype) conflicts with the new cask
-      # see https://goreleaser.com/deprecations/#brews for more information
-      - formula: grype
-
+# Per-arch container images pushed only to GHCR under the fork's owner.
+# Docker Hub removed for the first release; add back later if a rapidfort/grype
+# repo is created with DOCKERHUB_USERNAME/TOKEN secrets in the release workflow.
+#
+# Only production images ship — -nonroot and -debug variants dropped for first
+# release (add back on request if users need PodSecurityPolicy-friendly image
+# or in-container shell tools).
+#
+# Note: grype's Dockerfile has hardcoded LABELs including image.vendor="Anchore, Inc."
+# and a generic image.description. The `--label=` flags below override these at build
+# time — docker takes the latest label with a matching key. To fix at the source
+# instead of overriding, edit the LABEL directives in grype/Dockerfile directly.
 dockers:
-  # production images...
   - image_templates:
-      - anchore/grype:{{.Tag}}-amd64
-      - ghcr.io/anchore/grype:{{.Tag}}-amd64
-    goarch: amd64
-    dockerfile: Dockerfile
+      - "ghcr.io/rfjanit/grype:{{ .Version }}-amd64"
+      - "ghcr.io/rfjanit/grype:latest-amd64"
     use: buildx
+    goos: linux
+    goarch: amd64
+    ids:
+      - linux-build
+    dockerfile: Dockerfile
     build_flag_templates:
       - "--platform=linux/amd64"
       - "--provenance=false"
+      - "--label=org.opencontainers.image.title={{ .ProjectName }}"
+      - "--label=org.opencontainers.image.description=RapidFort's Grype fork with curated advisories"
+      - "--label=org.opencontainers.image.vendor=RapidFort"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.created={{ .Date }}"
+      - "--label=org.opencontainers.image.source=https://github.com/rfJanit/grype"
+      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
+      - "--label=org.opencontainers.image.url=https://github.com/rfJanit/grype"
+      # Grype's Dockerfile has ARG BUILD_DATE / BUILD_VERSION / VCS_REF / VCS_URL
+      # that populate additional LABELs. Missing --build-arg's would leave those
+      # labels empty; not fatal but visually ugly on `docker inspect`.
       - "--build-arg=BUILD_DATE={{.Date}}"
       - "--build-arg=BUILD_VERSION={{.Version}}"
       - "--build-arg=VCS_REF={{.FullCommit}}"
       - "--build-arg=VCS_URL={{.GitURL}}"
 
   - image_templates:
-      - anchore/grype:{{.Tag}}-arm64v8
-      - ghcr.io/anchore/grype:{{.Tag}}-arm64v8
+      - "ghcr.io/rfjanit/grype:{{ .Version }}-arm64"
+      - "ghcr.io/rfjanit/grype:latest-arm64"
+    use: buildx
+    goos: linux
     goarch: arm64
+    ids:
+      - linux-build
     dockerfile: Dockerfile
-    use: buildx
     build_flag_templates:
-      - "--platform=linux/arm64/v8"
+      - "--platform=linux/arm64"
       - "--provenance=false"
+      - "--label=org.opencontainers.image.title={{ .ProjectName }}"
+      - "--label=org.opencontainers.image.description=RapidFort's Grype fork with curated advisories"
+      - "--label=org.opencontainers.image.vendor=RapidFort"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.created={{ .Date }}"
+      - "--label=org.opencontainers.image.source=https://github.com/rfJanit/grype"
+      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
+      - "--label=org.opencontainers.image.url=https://github.com/rfJanit/grype"
       - "--build-arg=BUILD_DATE={{.Date}}"
       - "--build-arg=BUILD_VERSION={{.Version}}"
       - "--build-arg=VCS_REF={{.FullCommit}}"
       - "--build-arg=VCS_URL={{.GitURL}}"
 
   - image_templates:
-      - anchore/grype:{{.Tag}}-ppc64le
-      - ghcr.io/anchore/grype:{{.Tag}}-ppc64le
-    goarch: ppc64le
-    dockerfile: Dockerfile
+      - "ghcr.io/rfjanit/grype:{{ .Version }}-s390x"
+      - "ghcr.io/rfjanit/grype:latest-s390x"
     use: buildx
-    build_flag_templates:
-      - "--platform=linux/ppc64le"
-      - "--provenance=false"
-      - "--build-arg=BUILD_DATE={{.Date}}"
-      - "--build-arg=BUILD_VERSION={{.Version}}"
-      - "--build-arg=VCS_REF={{.FullCommit}}"
-      - "--build-arg=VCS_URL={{.GitURL}}"
-
-  - image_templates:
-      - anchore/grype:{{.Tag}}-s390x
-      - ghcr.io/anchore/grype:{{.Tag}}-s390x
+    goos: linux
     goarch: s390x
+    ids:
+      - linux-build
     dockerfile: Dockerfile
-    use: buildx
     build_flag_templates:
       - "--platform=linux/s390x"
       - "--provenance=false"
+      - "--label=org.opencontainers.image.title={{ .ProjectName }}"
+      - "--label=org.opencontainers.image.description=RapidFort's Grype fork with curated advisories"
+      - "--label=org.opencontainers.image.vendor=RapidFort"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.created={{ .Date }}"
+      - "--label=org.opencontainers.image.source=https://github.com/rfJanit/grype"
+      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
+      - "--label=org.opencontainers.image.url=https://github.com/rfJanit/grype"
       - "--build-arg=BUILD_DATE={{.Date}}"
       - "--build-arg=BUILD_VERSION={{.Version}}"
       - "--build-arg=VCS_REF={{.FullCommit}}"
       - "--build-arg=VCS_URL={{.GitURL}}"
 
-  # nonroot images...
   - image_templates:
-      - anchore/grype:{{.Tag}}-nonroot-amd64
-      - ghcr.io/anchore/grype:{{.Tag}}-nonroot-amd64
-    goarch: amd64
-    dockerfile: Dockerfile.nonroot
+      - "ghcr.io/rfjanit/grype:{{ .Version }}-ppc64le"
+      - "ghcr.io/rfjanit/grype:latest-ppc64le"
     use: buildx
-    build_flag_templates:
-      - "--platform=linux/amd64"
-      - "--provenance=false"
-      - "--build-arg=BUILD_DATE={{.Date}}"
-      - "--build-arg=BUILD_VERSION={{.Version}}"
-      - "--build-arg=VCS_REF={{.FullCommit}}"
-      - "--build-arg=VCS_URL={{.GitURL}}"
-
-  - image_templates:
-      - anchore/grype:{{.Tag}}-nonroot-arm64v8
-      - ghcr.io/anchore/grype:{{.Tag}}-nonroot-arm64v8
-    goarch: arm64
-    dockerfile: Dockerfile.nonroot
-    use: buildx
-    build_flag_templates:
-      - "--platform=linux/arm64/v8"
-      - "--provenance=false"
-      - "--build-arg=BUILD_DATE={{.Date}}"
-      - "--build-arg=BUILD_VERSION={{.Version}}"
-      - "--build-arg=VCS_REF={{.FullCommit}}"
-      - "--build-arg=VCS_URL={{.GitURL}}"
-
-  - image_templates:
-      - anchore/grype:{{.Tag}}-nonroot-ppc64le
-      - ghcr.io/anchore/grype:{{.Tag}}-nonroot-ppc64le
+    goos: linux
     goarch: ppc64le
-    dockerfile: Dockerfile.nonroot
-    use: buildx
+    ids:
+      - linux-build
+    dockerfile: Dockerfile
     build_flag_templates:
       - "--platform=linux/ppc64le"
       - "--provenance=false"
+      - "--label=org.opencontainers.image.title={{ .ProjectName }}"
+      - "--label=org.opencontainers.image.description=RapidFort's Grype fork with curated advisories"
+      - "--label=org.opencontainers.image.vendor=RapidFort"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.created={{ .Date }}"
+      - "--label=org.opencontainers.image.source=https://github.com/rfJanit/grype"
+      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
+      - "--label=org.opencontainers.image.url=https://github.com/rfJanit/grype"
       - "--build-arg=BUILD_DATE={{.Date}}"
       - "--build-arg=BUILD_VERSION={{.Version}}"
       - "--build-arg=VCS_REF={{.FullCommit}}"
       - "--build-arg=VCS_URL={{.GitURL}}"
 
-  - image_templates:
-      - anchore/grype:{{.Tag}}-nonroot-s390x
-      - ghcr.io/anchore/grype:{{.Tag}}-nonroot-s390x
-    goarch: s390x
-    dockerfile: Dockerfile.nonroot
-    use: buildx
-    build_flag_templates:
-      - "--platform=linux/s390x"
-      - "--provenance=false"
-      - "--build-arg=BUILD_DATE={{.Date}}"
-      - "--build-arg=BUILD_VERSION={{.Version}}"
-      - "--build-arg=VCS_REF={{.FullCommit}}"
-      - "--build-arg=VCS_URL={{.GitURL}}"
-
-  # debug images...
-  - image_templates:
-      - anchore/grype:{{.Tag}}-debug-amd64
-      - ghcr.io/anchore/grype:{{.Tag}}-debug-amd64
-    goarch: amd64
-    dockerfile: Dockerfile.debug
-    use: buildx
-    build_flag_templates:
-      - "--platform=linux/amd64"
-      - "--provenance=false"
-      - "--build-arg=BUILD_DATE={{.Date}}"
-      - "--build-arg=BUILD_VERSION={{.Version}}"
-      - "--build-arg=VCS_REF={{.FullCommit}}"
-      - "--build-arg=VCS_URL={{.GitURL}}"
-
-  - image_templates:
-      - anchore/grype:{{.Tag}}-debug-arm64v8
-      - ghcr.io/anchore/grype:{{.Tag}}-debug-arm64v8
-    goarch: arm64
-    dockerfile: Dockerfile.debug
-    use: buildx
-    build_flag_templates:
-      - "--platform=linux/arm64/v8"
-      - "--provenance=false"
-      - "--build-arg=BUILD_DATE={{.Date}}"
-      - "--build-arg=BUILD_VERSION={{.Version}}"
-      - "--build-arg=VCS_REF={{.FullCommit}}"
-      - "--build-arg=VCS_URL={{.GitURL}}"
-
-  - image_templates:
-      - anchore/grype:{{.Tag}}-debug-ppc64le
-      - ghcr.io/anchore/grype:{{.Tag}}-debug-ppc64le
-    goarch: ppc64le
-    dockerfile: Dockerfile.debug
-    use: buildx
-    build_flag_templates:
-      - "--platform=linux/ppc64le"
-      - "--provenance=false"
-      - "--build-arg=BUILD_DATE={{.Date}}"
-      - "--build-arg=BUILD_VERSION={{.Version}}"
-      - "--build-arg=VCS_REF={{.FullCommit}}"
-      - "--build-arg=VCS_URL={{.GitURL}}"
-
-  - image_templates:
-      - anchore/grype:{{.Tag}}-debug-s390x
-      - ghcr.io/anchore/grype:{{.Tag}}-debug-s390x
-    goarch: s390x
-    dockerfile: Dockerfile.debug
-    use: buildx
-    build_flag_templates:
-      - "--platform=linux/s390x"
-      - "--provenance=false"
-      - "--build-arg=BUILD_DATE={{.Date}}"
-      - "--build-arg=BUILD_VERSION={{.Version}}"
-      - "--build-arg=VCS_REF={{.FullCommit}}"
-      - "--build-arg=VCS_URL={{.GitURL}}"
-
+# Multi-arch manifests published only to GHCR under the fork's owner.
+# End users pull one of:
+#   docker pull ghcr.io/rfjanit/grype:latest          # newest release
+#   docker pull ghcr.io/rfjanit/grype:0.115.0-rf.1    # pinned version
+# The daemon picks the arch that matches its host.
 docker_manifests:
-  - name_template: anchore/grype:latest
+  - name_template: 'ghcr.io/rfjanit/grype:{{ .Version }}'
     image_templates:
-      - anchore/grype:{{.Tag}}-amd64
-      - anchore/grype:{{.Tag}}-arm64v8
-      - anchore/grype:{{.Tag}}-ppc64le
-      - anchore/grype:{{.Tag}}-s390x
+      - 'ghcr.io/rfjanit/grype:{{ .Version }}-amd64'
+      - 'ghcr.io/rfjanit/grype:{{ .Version }}-arm64'
+      - 'ghcr.io/rfjanit/grype:{{ .Version }}-s390x'
+      - 'ghcr.io/rfjanit/grype:{{ .Version }}-ppc64le'
 
-  - name_template: ghcr.io/anchore/grype:latest
+  - name_template: 'ghcr.io/rfjanit/grype:latest'
     image_templates:
-      - ghcr.io/anchore/grype:{{.Tag}}-amd64
-      - ghcr.io/anchore/grype:{{.Tag}}-arm64v8
-      - ghcr.io/anchore/grype:{{.Tag}}-ppc64le
-      - ghcr.io/anchore/grype:{{.Tag}}-s390x
+      - 'ghcr.io/rfjanit/grype:{{ .Version }}-amd64'
+      - 'ghcr.io/rfjanit/grype:{{ .Version }}-arm64'
+      - 'ghcr.io/rfjanit/grype:{{ .Version }}-s390x'
+      - 'ghcr.io/rfjanit/grype:{{ .Version }}-ppc64le'
 
-  - name_template: anchore/grype:{{.Tag}}
-    image_templates:
-      - anchore/grype:{{.Tag}}-amd64
-      - anchore/grype:{{.Tag}}-arm64v8
-      - anchore/grype:{{.Tag}}-ppc64le
-      - anchore/grype:{{.Tag}}-s390x
-
-  - name_template: ghcr.io/anchore/grype:{{.Tag}}
-    image_templates:
-      - ghcr.io/anchore/grype:{{.Tag}}-amd64
-      - ghcr.io/anchore/grype:{{.Tag}}-arm64v8
-      - ghcr.io/anchore/grype:{{.Tag}}-ppc64le
-      - ghcr.io/anchore/grype:{{.Tag}}-s390x
-
-  # nonroot images...
-  - name_template: anchore/grype:nonroot
-    image_templates:
-      - anchore/grype:{{.Tag}}-nonroot-amd64
-      - anchore/grype:{{.Tag}}-nonroot-arm64v8
-      - anchore/grype:{{.Tag}}-nonroot-ppc64le
-      - anchore/grype:{{.Tag}}-nonroot-s390x
-
-  - name_template: ghcr.io/anchore/grype:nonroot
-    image_templates:
-      - ghcr.io/anchore/grype:{{.Tag}}-nonroot-amd64
-      - ghcr.io/anchore/grype:{{.Tag}}-nonroot-arm64v8
-      - ghcr.io/anchore/grype:{{.Tag}}-nonroot-ppc64le
-      - ghcr.io/anchore/grype:{{.Tag}}-nonroot-s390x
-
-  - name_template: anchore/grype:{{.Tag}}-nonroot
-    image_templates:
-      - anchore/grype:{{.Tag}}-nonroot-amd64
-      - anchore/grype:{{.Tag}}-nonroot-arm64v8
-      - anchore/grype:{{.Tag}}-nonroot-ppc64le
-      - anchore/grype:{{.Tag}}-nonroot-s390x
-
-  - name_template: ghcr.io/anchore/grype:{{.Tag}}-nonroot
-    image_templates:
-      - ghcr.io/anchore/grype:{{.Tag}}-nonroot-amd64
-      - ghcr.io/anchore/grype:{{.Tag}}-nonroot-arm64v8
-      - ghcr.io/anchore/grype:{{.Tag}}-nonroot-ppc64le
-      - ghcr.io/anchore/grype:{{.Tag}}-nonroot-s390x
-
-  # debug images...
-  - name_template: anchore/grype:debug
-    image_templates:
-      - anchore/grype:{{.Tag}}-debug-amd64
-      - anchore/grype:{{.Tag}}-debug-arm64v8
-      - anchore/grype:{{.Tag}}-debug-ppc64le
-      - anchore/grype:{{.Tag}}-debug-s390x
-
-  - name_template: ghcr.io/anchore/grype:debug
-    image_templates:
-      - ghcr.io/anchore/grype:{{.Tag}}-debug-amd64
-      - ghcr.io/anchore/grype:{{.Tag}}-debug-arm64v8
-      - ghcr.io/anchore/grype:{{.Tag}}-debug-ppc64le
-      - ghcr.io/anchore/grype:{{.Tag}}-debug-s390x
-
-  - name_template: anchore/grype:{{.Tag}}-debug
-    image_templates:
-      - anchore/grype:{{.Tag}}-debug-amd64
-      - anchore/grype:{{.Tag}}-debug-arm64v8
-      - anchore/grype:{{.Tag}}-debug-ppc64le
-      - anchore/grype:{{.Tag}}-debug-s390x
-
-  - name_template: ghcr.io/anchore/grype:{{.Tag}}-debug
-    image_templates:
-      - ghcr.io/anchore/grype:{{.Tag}}-debug-amd64
-      - ghcr.io/anchore/grype:{{.Tag}}-debug-arm64v8
-      - ghcr.io/anchore/grype:{{.Tag}}-debug-ppc64le
-      - ghcr.io/anchore/grype:{{.Tag}}-debug-s390x
-
+# Cosign keyless signing of the checksums file. Works with GitHub's OIDC
+# provider — no external secrets needed, but the release workflow MUST
+# declare `permissions: id-token: write` (§3.2 of RELEASE-GUIDE-GRYPE.md).
+# This is one place where the Grype fork diverges from the Trivy fork: Trivy
+# disabled signing for the first release; Grype keeps it since it's zero-cost
+# once the workflow permission is in place.
 signs:
   - cmd: .tool/cosign
     signature: "${artifact}.sig"
